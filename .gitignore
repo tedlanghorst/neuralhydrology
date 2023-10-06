@@ -1,4 +1,5 @@
 # file extensions
+.DS_STORE
 **/*.pyc
 **/*.h5
 **/*.p
@@ -15,5 +16,7 @@ neuralhydrology.egg-info/*
 runs/
 configs/*
 .ipynb_checkpoints/
-data/*
+data/*/*
 docs/build/*
+
+!**/*.py
