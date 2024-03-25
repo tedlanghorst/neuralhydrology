@@ -97,7 +97,7 @@ def attributes_sanity_check(df: pd.DataFrame):
     # Check for NaNs in standard deviation of attributes.
     attributes = []
     if any(df.std() == 0.0) or any(df.std().isnull()):
-        for k, v in df.std().iteritems():
+        for k, v in df.std().items():
             if (v == 0) or (np.isnan(v)):
                 attributes.append(k)
     if attributes:

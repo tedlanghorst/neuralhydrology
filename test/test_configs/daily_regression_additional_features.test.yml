@@ -32,9 +32,9 @@ model: cudalstm
 head: regression
 output_activation: linear
 
-hidden_size: 16
+hidden_size: 32
 initial_forget_bias: 3
-output_dropout: 0.4
+output_dropout: 0.1
 
 # --- Training configuration -----------------------------------------------------------------------
 optimizer: Adam
@@ -44,7 +44,7 @@ learning_rate:
   10: 5e-4
   20: 1e-4
 batch_size: 256
-epochs: 1
+epochs: 50
 clip_gradient_norm: 1
 
 predict_last_n: 1
@@ -53,7 +53,7 @@ seq_length: 30
 num_workers: 0
 log_interval: 5
 log_tensorboard: True
-log_n_figures: 2
+log_n_figures: 4
 save_weights_every: 1
 save_validation_results: False
 

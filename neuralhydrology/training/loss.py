@@ -395,3 +395,35 @@ def _get_predict_last_n(cfg: Config) -> dict:
     if len(predict_last_n) == 1:
         predict_last_n = {'': list(predict_last_n.values())[0]}  # if there's only one frequency, we omit its identifier
     return predict_last_n
+
+
+class MaskedSmoothMSELoss(BaseLoss):
+    """A tuneable loss function that penalizes 'non-river-like' features.
+    The loss is defined by a standard MSE function with added penalties for
+    variance and smoothness of the time series.
+
+    To use this loss in a forward pass, the passed `prediction` dict must contain
+    the key ``y_hat``, and the `data` dict must contain ``y``.
+
+    Parameters
+    ----------
+    cfg : Config
+        The run configuration.
+    """
+
+    def __init__(self, cfg: Config):
+        super(MaskedSmoothMSELoss, self).__init__(cfg, prediction_keys=['y_hat'], ground_truth_keys=['y'])
+        self.variance_weight = variance_weight
+        self.smoothness_weight = smoothness_weight
+
+
+    def _get_loss(self, prediction: Dict[str, torch.Tensor], ground_truth: Dict[str, torch.Tensor], **kwargs):
+        mask = ~torch.isnan(ground_truth['y'])
+        mse_loss = 0.5 * torch.mean((prediction['y_hat'][mask] - ground_truth['y'][mask])**2)
+
+        smoothness_penalty = torch.mean(torch.abs(prediction['y_hat'][1:] - prediction['y_hat'][:-1]))
+
+
+        # Combine the losses, using the hyperparameters to weight the variance and smoothness penalties
+        total_loss = mse_loss  + (self.smoothness_weight * smoothness_penalty)
+        return total_loss

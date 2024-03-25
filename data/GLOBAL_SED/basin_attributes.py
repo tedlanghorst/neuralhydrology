@@ -15,7 +15,7 @@ import fiona
 from tqdm import tqdm
 
 
-with open("./preprocessed/metadata/basin_polygons/upstream_ids.json", "r") as file:
+with open("./preprocessed/hybas/metadata/basin_polygons/upstream_ids.json", "r") as file:
     upstream_ids = json.load(file)
 
 # Read in hydroatlas
@@ -226,7 +226,7 @@ for basin in tqdm(upstream_ids.keys()):
     # Convert the basin_data dictionary to a Series and assign it to the DataFrame
     basin_attributes.loc[basin] = pd.Series(basin_data)
     
-basin_attributes.to_pickle("./basin_attributes.pickle")
+basin_attributes.to_pickle("./preprocessed/hybas/metadata/basin_attributes.pickle")
 
 
 
