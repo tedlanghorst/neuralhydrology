@@ -107,6 +107,11 @@ class BaseDataset(Dataset):
         else:
             self._compute_scaler = False
 
+        if getattr(self.cfg, 'dynamics_quality_suffix') is not None:
+            self.quality_inputs = [col + self.cfg.dynamics_quality_suffix for col in self.cfg.dynamic_inputs]
+        else:
+            self.quality_inputs = []
+
         # check and extract frequency information from config
         self.frequencies = []
         self.seq_len = None
@@ -118,6 +123,7 @@ class BaseDataset(Dataset):
 
         # initialize class attributes that are filled in the data loading functions
         self._x_d = {}
+        self._x_dq = {}
         self._x_h = {}
         self._x_f = {}
         self._x_s = {}
@@ -172,6 +178,8 @@ class BaseDataset(Dataset):
             else:
                 raise ValueError('Data must include x_d or x_h.')
 
+            if self._x_dq:
+                sample[f'x_dq{freq_suffix}'] = self._x_dq[basin][freq][hindcast_start_idx:global_end_idx]
             sample[f'y{freq_suffix}'] = self._y[basin][freq][hindcast_start_idx:global_end_idx]
             sample[f'date{freq_suffix}'] = self._dates[basin][freq][hindcast_start_idx:global_end_idx]
 
@@ -313,15 +321,15 @@ class BaseDataset(Dataset):
             data_list = []
 
             # list of columns to keep, everything else will be removed to reduce memory footprint
-            keep_cols = self.cfg.target_variables + self.cfg.evolving_attributes + self.cfg.mass_inputs + self.cfg.autoregressive_inputs
+            keep_cols = self.cfg.target_variables + self.cfg.evolving_attributes + self.cfg.mass_inputs + self.cfg.autoregressive_inputs + self.quality_inputs
 
             if isinstance(self.cfg.dynamic_inputs, list):
                 keep_cols += self.cfg.dynamic_inputs
             else:
                 # keep all frequencies' dynamic inputs
                 keep_cols += [i for inputs in self.cfg.dynamic_inputs.values() for i in inputs]
-            # make sure that even inputs that are used in multiple frequencies occur only once in the df
 
+            # make sure that even inputs that are used in multiple frequencies occur only once in the df
             keep_cols = list(sorted(set(keep_cols)))
 
             if not self._disable_pbar:
@@ -525,8 +533,8 @@ class BaseDataset(Dataset):
 
             # store data of each frequency as numpy array of shape [time steps, features] and dates as numpy array of
             # shape (time steps,)
-            x_d, x_s, y, dates = {}, {}, {}, {}
-            x_d_column_names = []
+            x_d, x_dq, x_s, y, dates = {}, {}, {}, {}, {}
+            x_d_column_names, x_dq_column_names = [], []
 
             # keys: frequencies, values: array mapping each lowest-frequency
             # sample to its corresponding sample in this frequency
@@ -543,7 +551,10 @@ class BaseDataset(Dataset):
                     dynamic_cols = self.cfg.mass_inputs + self.cfg.dynamic_inputs[freq]
 
                 df_resampled = df_native[dynamic_cols + self.cfg.target_variables + self.cfg.evolving_attributes +
-                                         self.cfg.autoregressive_inputs].resample(freq).mean()
+                                         self.cfg.autoregressive_inputs + self.quality_inputs].resample(freq).mean()
+
+                # print(f"df_native: {df_native}")
+                # print(f"df_resmapled: {df_resampled}")
 
                 # pull all of the data that needs to be validated
                 x_d[freq] = df_resampled[dynamic_cols].values
@@ -551,6 +562,13 @@ class BaseDataset(Dataset):
                 y[freq] = df_resampled[self.cfg.target_variables].values
                 if self.cfg.evolving_attributes:
                     x_s[freq] = df_resampled[self.cfg.evolving_attributes].values
+                if self.quality_inputs:
+                    x_dq[freq] = df_resampled[self.quality_inputs].values
+                    x_dq_column_names = self.quality_inputs
+                # print(f"x_dq: {x_dq}")
+                # if x_dq:
+                #     print("IS x_dq")
+                #     print(x_dq_column_names)
 
                 # Add dates of the (resampled) data to the dates dict
                 dates[freq] = df_resampled.index.to_numpy()
@@ -579,8 +597,9 @@ class BaseDataset(Dataset):
                 # checks inputs and outputs for each sequence. valid: flag = 1, invalid: flag = 0
                 # manually unroll the dicts into lists to make sure the order of frequencies is consistent.
                 # during inference, we want all samples with sufficient history (even if input is NaN), so
-                # we pass x_d, x_s, y as None.
+                # we pass x_d,x_dq, x_s, y as None.
                 flag = validate_samples(x_d=[x_d[freq] for freq in self.frequencies] if self.is_train else None,
+                                        x_dq=[x_dq[freq] for freq in self.frequencies] if self.is_train and x_dq else None,
                                         x_s=[x_s[freq] for freq in self.frequencies] if self.is_train and x_s else None,
                                         y=[y[freq] for freq in self.frequencies] if self.is_train else None,
                                         frequency_maps=[frequency_maps[freq] for freq in self.frequencies],
@@ -614,6 +633,8 @@ class BaseDataset(Dataset):
                 self._y[basin] = {freq: torch.from_numpy(_y.astype(np.float32)) for freq, _y in y.items()}
                 if x_s:
                     self._x_s[basin] = {freq: torch.from_numpy(_x_s.astype(np.float32)) for freq, _x_s in x_s.items()}
+                if x_dq:
+                    self._x_dq[basin] = {freq: torch.from_numpy(_x_dq.astype(np.float32)) for freq, _x_dq in x_dq.items()}
                 self._dates[basin] = dates
             else:
                 basins_without_samples.append(basin)
@@ -723,6 +744,18 @@ class BaseDataset(Dataset):
         self.scaler["xarray_feature_scale"] = xr.std(skipna=True)
         self.scaler["xarray_feature_center"] = xr.mean(skipna=True)
 
+        # Normalize quality columns to 0-1. 
+        for col in self.quality_inputs:
+            min_val = xr[col].min(skipna=True).values
+            max_val = xr[col].max(skipna=True).values
+            if min_val != max_val:  # avoid division by zero
+                self.scaler["xarray_feature_scale"][col] = max_val - min_val
+                self.scaler["xarray_feature_center"][col] = min_val
+            else:
+                # Handle the case where all values are the same (either 0 or 1)
+                self.scaler["xarray_feature_scale"][col] = 1
+                self.scaler["xarray_feature_center"][col] = 0 if min_val == 1 else min_val
+
         # check for feature-wise custom normalization
         for feature, feature_specs in self.cfg.custom_normalization.items():
             for key, val in feature_specs.items():
@@ -812,7 +845,7 @@ class BaseDataset(Dataset):
 
 
 @njit()
-def validate_samples(x_d: List[np.ndarray], x_s: List[np.ndarray], y: List[np.ndarray], seq_length: List[int],
+def validate_samples(x_d: List[np.ndarray], x_dq: List[np.ndarray], x_s: List[np.ndarray], y: List[np.ndarray], seq_length: List[int],
                      predict_last_n: List[int], frequency_maps: List[np.ndarray]) -> np.ndarray:
     """Checks for invalid samples due to NaN or insufficient sequence length.
 
@@ -820,6 +853,8 @@ def validate_samples(x_d: List[np.ndarray], x_s: List[np.ndarray], y: List[np.nd
     ----------
     x_d : List[np.ndarray]
         List of dynamic input data; one entry per frequency
+    x_dq : List[np.ndarray]
+        List of data quality input data; one entry per frequency.
     x_s : List[np.ndarray]
         List of additional static input data; one entry per frequency
     y : List[np.ndarray]
@@ -854,6 +889,13 @@ def validate_samples(x_d: List[np.ndarray], x_s: List[np.ndarray], y: List[np.nd
             if x_d is not None:
                 _x_d = x_d[i][last_sample_of_freq - seq_length[i] + 1:last_sample_of_freq + 1]
                 if np.any(np.isnan(_x_d)):
+                    flag[j] = 0
+                    continue
+
+            # any NaN in the dynamic qa inputs makes the sample invalid
+            if x_dq is not None:
+                _x_dq = x_dq[i][last_sample_of_freq - seq_length[i] + 1:last_sample_of_freq + 1]
+                if np.any(np.isnan(_x_dq)):
                     flag[j] = 0
                     continue
 

@@ -66,21 +66,37 @@ class InputLayer(nn.Module):
         if cfg.use_basin_id_encoding:
             statics_input_size += cfg.number_of_basins
 
+        # Required have 1 quality column per input column.
+        quality_input_size = dynamics_input_size
+
         self.statics_embedding, self.statics_output_size = \
             self._get_embedding_net(cfg.statics_embedding, statics_input_size, 'statics')
+        
         self.dynamics_embedding, self.dynamics_output_size = \
             self._get_embedding_net(cfg.dynamics_embedding, dynamics_input_size, 'dynamics')
+        
+        self.dynamics_quality_embedding, self.dynamics_quality_output_size = \
+            self._get_embedding_net(cfg.dynamics_quality_embedding, quality_input_size, 'dynamics')
 
         if cfg.statics_embedding is None:
             self.statics_embedding_p_dropout = 0.0  # if net has no statics dropout we treat is as zero
         else:
             self.statics_embedding_p_dropout = cfg.statics_embedding['dropout']
+
         if cfg.dynamics_embedding is None:
             self.dynamics_embedding_p_dropout = 0.0  # if net has no dynamics dropout we treat is as zero
         else:
             self.dynamics_embedding_p_dropout = cfg.dynamics_embedding['dropout']
 
-        self.output_size = self.dynamics_output_size + self.statics_output_size + self._num_autoregression_inputs
+        if cfg.dynamics_quality_embedding is None:
+            self.dynamics_quality_embedding_p_dropout = 0.0  # if net has no dynamics quality dropout we treat is as zero
+        else:
+            self.dynamics_quality_embedding_p_dropout = cfg.dynamics_quality_embedding['dropout']
+
+        self.output_size = (self.dynamics_output_size + 
+                            self.statics_output_size + 
+                            self.dynamics_quality_output_size + 
+                            self._num_autoregression_inputs)
         if cfg.head.lower() == "umal":
             self.output_size += 1
 
@@ -160,6 +176,12 @@ class InputLayer(nn.Module):
         else:
             x_s = None
 
+        # Get the data quality tensor
+        if 'x_dq' in data:
+            x_dq = data['x_dq'].transpose(0, 1)
+        else:
+            x_dq = None
+
         # Don't run autoregressive inputs through the embedding layer. This does not work with NaN's
         if self._num_autoregression_inputs > 0:
             dynamics_out = self.dynamics_embedding(x_d[:, :, :-self._num_autoregression_inputs])
@@ -170,15 +192,24 @@ class InputLayer(nn.Module):
         if x_s is not None:
             statics_out = self.statics_embedding(x_s)
 
+        quality_out = None
+        if x_dq is not None:
+            quality_out = x_dq
+
         if not concatenate_output:
             ret_val = dynamics_out, statics_out
+            if x_dq is not None:
+                ret_val = (*ret_val, quality_out)
         else:
             if statics_out is not None:
                 statics_out = statics_out.unsqueeze(0).repeat(dynamics_out.shape[0], 1, 1)
                 ret_val = torch.cat([dynamics_out, statics_out], dim=-1)
             else:
                 ret_val = dynamics_out
-            
+
+            if x_dq is not None:
+                ret_val = (ret_val, quality_out)
+                
             # Append autoregressive inputs to the end of the output.
             if self._num_autoregression_inputs:
                 ret_val = torch.cat([ret_val, x_d[:, :, -self._num_autoregression_inputs:]], dim=-1)
@@ -191,5 +222,7 @@ class InputLayer(nn.Module):
             return self.statics_embedding
         elif item == "dynamics_embedding":
             return self.dynamics_embedding
+        elif item=="dyanmics_quality_embedding":
+            return self.dynamics_quality_embedding
         else:
             raise KeyError(f"Cannot access {item} on InputLayer")

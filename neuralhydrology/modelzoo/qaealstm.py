@@ -9,7 +9,7 @@ from neuralhydrology.modelzoo.head import get_head
 from neuralhydrology.utils.config import Config
 
 
-class EALSTM(BaseModel):
+class QAEALSTM(BaseModel):
     """Entity-Aware LSTM (EA-LSTM) model class.
 
     This model has been proposed by Kratzert et al. [#]_ as a variant of the standard LSTM. The main difference is that
@@ -36,12 +36,13 @@ class EALSTM(BaseModel):
     module_parts = ['embedding_net', 'input_gate', 'dynamic_gates', 'head']
 
     def __init__(self, cfg: Config):
-        super(EALSTM, self).__init__(cfg=cfg)
+        super(QAEALSTM, self).__init__(cfg=cfg)
         self._hidden_size = cfg.hidden_size
 
         self.embedding_net = InputLayer(cfg)
 
         self.input_gate = nn.Linear(self.embedding_net.statics_output_size, cfg.hidden_size)
+        self.quality_gate = nn.Linear(self.embedding_net.dynamics_output_size, len(cfg.dynamic_inputs))
 
         # create tensors of learnable parameters
         self.dynamic_gates = _DynamicGates(cfg=cfg, input_size=self.embedding_net.dynamics_output_size)
@@ -49,13 +50,18 @@ class EALSTM(BaseModel):
 
         self.head = get_head(cfg=cfg, n_in=cfg.hidden_size, n_out=self.output_size)
 
-    def _cell(self, x: torch.Tensor, i: torch.Tensor, states: Tuple[torch.Tensor,
-                                                                    torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _cell(self, x: torch.Tensor, i: torch.Tensor, states: Tuple[torch.Tensor, torch.Tensor], x_dq: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Single time step logic of EA-LSTM cell"""
         h_0, c_0 = states
 
+        # Modulate the input data with the quality gate
+        x_dq = (x_dq==1)/1.0
+        q = torch.sigmoid(self.quality_gate(x_dq))
+        # q = torch.sigmoid(x_dq)
+        x_modulated = q * x
+
         # calculate gates
-        gates = self.dynamic_gates(h_0, x)
+        gates = self.dynamic_gates(h_0, x_modulated)
         f, o, g = gates.chunk(3, 1)
 
         c_1 = torch.sigmoid(f) * c_0 + i * torch.tanh(g)
@@ -82,7 +88,7 @@ class EALSTM(BaseModel):
                     [batch size, sequence length, number of target variables].
         """
         # possibly pass dynamic and static inputs through embedding layers
-        x_d, x_s = self.embedding_net(data, concatenate_output=False)
+        x_d, x_s, _ = self.embedding_net(data, concatenate_output=False)
         if x_s is None:
             raise ValueError('Need x_s or x_one_hot in forward pass.')
 
@@ -96,10 +102,10 @@ class EALSTM(BaseModel):
         # calculate input gate only once because inputs are static
         i = torch.sigmoid(self.input_gate(x_s))
 
+        x_dq = data['x_dq'].transpose(0,1)
         # perform forward steps over input sequence
-        for x_dt in x_d:
-
-            h_t, c_t = self._cell(x_dt, i, (h_t, c_t))
+        for x_d_t, x_dq_t in zip(x_d, x_dq):
+            h_t, c_t = self._cell(x_d_t, i, (h_t, c_t), x_dq_t)
 
             # store intermediate hidden/cell state in list
             h_n.append(h_t)

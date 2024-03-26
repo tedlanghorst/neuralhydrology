@@ -75,6 +75,8 @@ def start_run(config_file: Path, gpu: int = None):
 
     start_training(config)
 
+    return config
+
 
 def continue_run(run_dir: Path, config_file: Path = None, gpu: int = None):
     """Continue model training.

@@ -6,6 +6,7 @@ from neuralhydrology.modelzoo.arlstm import ARLSTM
 from neuralhydrology.modelzoo.cudalstm import CudaLSTM
 from neuralhydrology.modelzoo.customlstm import CustomLSTM
 from neuralhydrology.modelzoo.ealstm import EALSTM
+from neuralhydrology.modelzoo.qaealstm import QAEALSTM
 from neuralhydrology.modelzoo.embcudalstm import EmbCudaLSTM
 from neuralhydrology.modelzoo.handoff_forecast_lstm import HandoffForecastLSTM
 from neuralhydrology.modelzoo.gru import GRU
@@ -19,8 +20,9 @@ from neuralhydrology.modelzoo.transformer import Transformer
 from neuralhydrology.utils.config import Config
 
 SINGLE_FREQ_MODELS = [
-    "cudalstm", 
-    "ealstm", 
+    "cudalstm",
+    "ealstm",
+    "qaealstm", 
     "customlstm", 
     "embcudalstm", 
     "gru", 
@@ -33,6 +35,8 @@ SINGLE_FREQ_MODELS = [
     "stacked_forecast_lstm"
 ]
 AUTOREGRESSIVE_MODELS = ['arlstm']
+
+QUALITY_MODULATED_MODELS = ['qaealstm']
 
 
 def get_model(cfg: Config) -> nn.Module:
@@ -53,6 +57,9 @@ def get_model(cfg: Config) -> nn.Module:
 
     if cfg.model.lower() not in AUTOREGRESSIVE_MODELS and cfg.autoregressive_inputs:
         raise ValueError(f"Model {cfg.model} does not support autoregression.")
+    
+    if cfg.model.lower() not in QUALITY_MODULATED_MODELS and cfg.dynamics_quality_suffix:
+        raise ValueError(f"Model {cfg.model} does not support data quality features")
 
     if cfg.model.lower() != "mclstm" and cfg.mass_inputs:
         raise ValueError(f"The use of 'mass_inputs' with {cfg.model} is not supported.")
@@ -63,6 +70,8 @@ def get_model(cfg: Config) -> nn.Module:
         model = CudaLSTM(cfg=cfg)
     elif cfg.model.lower() == "ealstm":
         model = EALSTM(cfg=cfg)
+    elif cfg.model.lower() == "qaealstm":
+        model = QAEALSTM(cfg=cfg)
     elif cfg.model.lower() == "customlstm":
         model = CustomLSTM(cfg=cfg)
     elif cfg.model.lower() == "lstm":

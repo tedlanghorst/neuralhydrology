@@ -69,7 +69,6 @@ class GenericDataset(BaseDataset):
     def _load_basin_data(self, basin: str) -> pd.DataFrame:
         """Load input and output data. """
         df = load_timeseries(data_dir=self.cfg.data_dir, basin=basin)
-
         return df
 
     def _load_attributes(self) -> pd.DataFrame:

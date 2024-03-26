@@ -355,6 +355,18 @@ class Config(object):
         if embedding_spec is None:
             return None
         return self._get_embedding_spec(embedding_spec)
+    
+    @property
+    def dynamics_quality_suffix(self) -> str:
+        return self._cfg.get("dynamics_quality_suffix", None)
+
+    @property
+    def dynamics_quality_embedding(self) -> dict:
+        embedding_spec = self._cfg.get("dynamics_quality_embedding", None)
+
+        if embedding_spec is None:
+            return None
+        return self._get_embedding_spec(embedding_spec)
 
     @property
     def epochs(self) -> int:
