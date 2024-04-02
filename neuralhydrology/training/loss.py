@@ -105,15 +105,15 @@ class BaseLoss(torch.nn.Module):
             freq_pred, freq_gt = self._subset_in_time(
                 {key: prediction[f'{key}{freq_suffix}'] for key in self._prediction_keys},
                 {key: data[f'{key}{freq_suffix}'] for key in self._ground_truth_keys}, self._predict_last_n[freq])
-
+            
             # remember subsets for multi-frequency component
             prediction_sub.update({f'{key}{freq_suffix}': freq_pred[key] for key in freq_pred.keys()})
             ground_truth_sub.update({f'{key}{freq_suffix}': freq_gt[key] for key in freq_gt.keys()})
-
+            
             for n_target, weight in enumerate(self._target_weights):
                 # subset the model outputs and ground truth corresponding to this particular target
                 target_pred, target_gt = self._subset_target(freq_pred, freq_gt, n_target)
-
+                
                 # model hook to subset additional data, which might be different for different losses
                 kwargs_sub = self._subset_additional_data(kwargs, n_target)
 
@@ -131,6 +131,7 @@ class BaseLoss(torch.nn.Module):
             # One name may appear multiple times. We add all regularizations of the same name for logging purposes.
             all_losses[reg_module.name] += reg_out
         all_losses['total_loss'] = total_loss
+
         return total_loss, all_losses
 
     @staticmethod
@@ -397,33 +398,23 @@ def _get_predict_last_n(cfg: Config) -> dict:
     return predict_last_n
 
 
-class MaskedSmoothMSELoss(BaseLoss):
-    """A tuneable loss function that penalizes 'non-river-like' features.
-    The loss is defined by a standard MSE function with added penalties for
-    variance and smoothness of the time series.
-
-    To use this loss in a forward pass, the passed `prediction` dict must contain
-    the key ``y_hat``, and the `data` dict must contain ``y``.
-
-    Parameters
-    ----------
-    cfg : Config
-        The run configuration.
-    """
-
+class IntermittentFlowMSELoss(BaseLoss):
     def __init__(self, cfg: Config):
-        super(MaskedSmoothMSELoss, self).__init__(cfg, prediction_keys=['y_hat'], ground_truth_keys=['y'])
-        self.variance_weight = variance_weight
-        self.smoothness_weight = smoothness_weight
-
+        super(IntermittentFlowMSELoss, self).__init__(cfg,
+                                                      prediction_keys=['y_hat'],
+                                                      ground_truth_keys=['y'],
+                                                      additional_data=['x_d'])
+        self.cfg = cfg
 
     def _get_loss(self, prediction: Dict[str, torch.Tensor], ground_truth: Dict[str, torch.Tensor], **kwargs):
+        # Mask for NaN values in ground truth
         mask = ~torch.isnan(ground_truth['y'])
-        mse_loss = 0.5 * torch.mean((prediction['y_hat'][mask] - ground_truth['y'][mask])**2)
+        # Mean squared error loss
+        mse_term = 0.5 * torch.mean((prediction['y_hat'][mask] - ground_truth['y'][mask])**2)
+        
+        # Additional term to penalize non-zero predictions during zero flow.
+        Q = kwargs["ifmse_q"]
+        zero_target = kwargs['ifmse_zero_target']
+        Q_term = torch.mean(((Q<0.01)*(prediction['y_hat']-zero_target)*2))
 
-        smoothness_penalty = torch.mean(torch.abs(prediction['y_hat'][1:] - prediction['y_hat'][:-1]))
-
-
-        # Combine the losses, using the hyperparameters to weight the variance and smoothness penalties
-        total_loss = mse_loss  + (self.smoothness_weight * smoothness_penalty)
-        return total_loss
+        return mse_term + Q_term

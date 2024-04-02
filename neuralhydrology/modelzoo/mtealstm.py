@@ -2,6 +2,7 @@ from typing import Dict, Tuple
 
 import torch
 import torch.nn as nn
+import numpy as np
 
 from neuralhydrology.modelzoo.basemodel import BaseModel
 from neuralhydrology.modelzoo.inputlayer import InputLayer
@@ -9,7 +10,7 @@ from neuralhydrology.modelzoo.head import get_head
 from neuralhydrology.utils.config import Config
 
 
-class QAEALSTM(BaseModel):
+class MTEALSTM(BaseModel):
     """Entity-Aware LSTM (EA-LSTM) model class.
 
     This model has been proposed by Kratzert et al. [#]_ as a variant of the standard LSTM. The main difference is that
@@ -36,35 +37,51 @@ class QAEALSTM(BaseModel):
     module_parts = ['embedding_net', 'input_gate', 'dynamic_gates', 'head']
 
     def __init__(self, cfg: Config):
-        super(QAEALSTM, self).__init__(cfg=cfg)
+        super(MTEALSTM, self).__init__(cfg=cfg)
         self._hidden_size = cfg.hidden_size
+        self.input_size = len(cfg.dynamic_inputs)
 
         self.embedding_net = InputLayer(cfg)
 
         self.input_gate = nn.Linear(self.embedding_net.statics_output_size, cfg.hidden_size)
-        self.quality_gate = nn.Linear(self.embedding_net.dynamics_output_size, len(cfg.dynamic_inputs))
 
         # create tensors of learnable parameters
         self.dynamic_gates = _DynamicGates(cfg=cfg, input_size=self.embedding_net.dynamics_output_size)
         self.dropout = nn.Dropout(p=cfg.output_dropout)
 
+        self.weight_decomp = nn.Parameter(torch.FloatTensor(self.input_size, cfg.hidden_size, cfg.hidden_size))
+        self.bias_decomp = nn.Parameter(torch.FloatTensor(self.input_size, cfg.hidden_size))
+        # Intialize our new long and short term memory parameters.
+        for i in range(self.input_size):
+            nn.init.xavier_uniform_(self.weight_decomp[i])
+        nn.init.zeros_(self.bias_decomp)
+
         self.head = get_head(cfg=cfg, n_in=cfg.hidden_size, n_out=self.output_size)
 
-    def _cell(self, x: torch.Tensor, i: torch.Tensor, states: Tuple[torch.Tensor, torch.Tensor], x_dq: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _cell(self, x: torch.Tensor, i: torch.Tensor, dt: torch.Tensor, states: Tuple[torch.Tensor,
+                                                                                      torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         """Single time step logic of EA-LSTM cell"""
         h_0, c_0 = states
 
-        # Modulate the input data with the quality gate
-        # x_dq = (x_dq==1)/1.0
-        # q = torch.sigmoid(x_dq)
-        q = torch.sigmoid(self.quality_gate(x_dq))
-        x_modulated = q * x
-
         # calculate gates
-        gates = self.dynamic_gates(h_0, x_modulated)
+        gates = self.dynamic_gates(h_0, x)
         f, o, g = gates.chunk(3, 1)
 
-        c_1 = torch.sigmoid(f) * c_0 + i * torch.tanh(g)
+        cs_hat_0_list = []
+        ct_0_list = []
+        for i in range(self.input_size):
+            cs_0 = torch.tanh(torch.matmul(c_0, self.weight_decomp[i].T) + self.bias_decomp[i])
+            time_decay = 1.0 / torch.log(torch.tensor(np.e) + dt[:, i])
+            cs_hat_0 = cs_0 * time_decay.unsqueeze(1)
+            cs_hat_0_list.append(cs_hat_0)
+
+            ct_0 = c_0 - cs_0
+            ct_0_list.append(ct_0)
+
+        ct_0 = torch.sum(torch.stack(ct_0_list, dim=0), dim=0)
+        c_star = ct_0 + torch.sum(torch.stack(cs_hat_0_list, dim=0), dim=0)
+
+        c_1 = torch.sigmoid(f) * c_star + i * torch.tanh(g)
         h_1 = torch.sigmoid(o) * torch.tanh(c_1)
 
         return h_1, c_1
@@ -88,9 +105,12 @@ class QAEALSTM(BaseModel):
                     [batch size, sequence length, number of target variables].
         """
         # possibly pass dynamic and static inputs through embedding layers
-        x_d, x_s, _ = self.embedding_net(data, concatenate_output=False)
+        x_d, x_s = self.embedding_net(data, concatenate_output=False)
         if x_s is None:
             raise ValueError('Need x_s or x_one_hot in forward pass.')
+
+        # Match the tranpose in the embedding layer
+        x_dt = data['x_dt'].transpose(0,1) 
 
         # TODO: move hidden and cell state initialization to init and only reset states in forward pass to zero.
         h_t = x_d.data.new(x_d.shape[1], self._hidden_size).zero_()
@@ -102,10 +122,9 @@ class QAEALSTM(BaseModel):
         # calculate input gate only once because inputs are static
         i = torch.sigmoid(self.input_gate(x_s))
 
-        x_dq = data['x_dq'].transpose(0,1)
         # perform forward steps over input sequence
-        for x_d_t, x_dq_t in zip(x_d, x_dq):
-            h_t, c_t = self._cell(x_d_t, i, (h_t, c_t), x_dq_t)
+        for x_dt, x_dtt in zip(x_d, x_dt):
+            h_t, c_t = self._cell(x_dt, i, x_dtt, (h_t, c_t))
 
             # store intermediate hidden/cell state in list
             h_n.append(h_t)

@@ -112,6 +112,11 @@ class BaseDataset(Dataset):
         else:
             self.quality_inputs = []
 
+        if self.cfg.model.lower() == "mtealstm":
+            self.time_delta_cols = [col + "_dt" for col in self.cfg.dynamic_inputs]
+        else:
+            self.time_delta_cols = []
+
         # check and extract frequency information from config
         self.frequencies = []
         self.seq_len = None
@@ -124,6 +129,7 @@ class BaseDataset(Dataset):
         # initialize class attributes that are filled in the data loading functions
         self._x_d = {}
         self._x_dq = {}
+        self._x_dt = {}
         self._x_h = {}
         self._x_f = {}
         self._x_s = {}
@@ -180,6 +186,10 @@ class BaseDataset(Dataset):
 
             if self._x_dq:
                 sample[f'x_dq{freq_suffix}'] = self._x_dq[basin][freq][hindcast_start_idx:global_end_idx]
+
+            if self._x_dt:
+                sample[f'x_dt{freq_suffix}'] = self._x_dt[basin][freq][hindcast_start_idx:global_end_idx]
+
             sample[f'y{freq_suffix}'] = self._y[basin][freq][hindcast_start_idx:global_end_idx]
             sample[f'date{freq_suffix}'] = self._dates[basin][freq][hindcast_start_idx:global_end_idx]
 
@@ -281,6 +291,17 @@ class BaseDataset(Dataset):
                 df[var] = np.nan
 
         return df
+    
+    def _add_time_deltas(self, df: pd.DataFrame) -> pd.DataFrame:
+        for col_xd, col_dt in zip(self.cfg.dynamic_inputs, self.time_delta_cols):
+            # Calculate the time deltas
+            nan_mask = df[col_xd].isna()
+            df[col_dt] = nan_mask.groupby((nan_mask == False).cumsum()).cumsum()
+
+            # Forward fill the missing data.
+            df[col_xd] = df[col_xd].ffill()
+
+        return df
 
     def _add_lagged_features(self, df: pd.DataFrame) -> pd.DataFrame:
 
@@ -321,7 +342,7 @@ class BaseDataset(Dataset):
             data_list = []
 
             # list of columns to keep, everything else will be removed to reduce memory footprint
-            keep_cols = self.cfg.target_variables + self.cfg.evolving_attributes + self.cfg.mass_inputs + self.cfg.autoregressive_inputs + self.quality_inputs
+            keep_cols = self.cfg.target_variables + self.cfg.evolving_attributes + self.cfg.mass_inputs + self.cfg.autoregressive_inputs + self.quality_inputs + self.time_delta_cols
 
             if isinstance(self.cfg.dynamic_inputs, list):
                 keep_cols += self.cfg.dynamic_inputs
@@ -339,6 +360,9 @@ class BaseDataset(Dataset):
 
                 # add columns from dataframes passed as additional data files
                 df = pd.concat([df, *[d[basin] for d in self.additional_features]], axis=1)
+
+                if self.time_delta_cols:
+                    df = self._add_time_deltas(df)
 
                 # if target variables are missing for basin, add empty column to still allow predictions to be made
                 if not self.is_train:
@@ -533,13 +557,15 @@ class BaseDataset(Dataset):
 
             # store data of each frequency as numpy array of shape [time steps, features] and dates as numpy array of
             # shape (time steps,)
-            x_d, x_dq, x_s, y, dates = {}, {}, {}, {}, {}
-            x_d_column_names, x_dq_column_names = [], []
+            x_d, x_dq, x_dt, x_s, y, dates = {}, {}, {}, {}, {}, {}
+            x_d_column_names = []
 
             # keys: frequencies, values: array mapping each lowest-frequency
             # sample to its corresponding sample in this frequency
             frequency_maps = {}
             lowest_freq = utils.sort_frequencies(self.frequencies)[0]
+
+            
 
             # converting from xarray to pandas DataFrame because resampling is much faster in pandas.
             df_native = xr.sel(basin=basin).to_dataframe()
@@ -551,10 +577,7 @@ class BaseDataset(Dataset):
                     dynamic_cols = self.cfg.mass_inputs + self.cfg.dynamic_inputs[freq]
 
                 df_resampled = df_native[dynamic_cols + self.cfg.target_variables + self.cfg.evolving_attributes +
-                                         self.cfg.autoregressive_inputs + self.quality_inputs].resample(freq).mean()
-
-                # print(f"df_native: {df_native}")
-                # print(f"df_resmapled: {df_resampled}")
+                                         self.cfg.autoregressive_inputs + self.quality_inputs + self.time_delta_cols].resample(freq).mean()
 
                 # pull all of the data that needs to be validated
                 x_d[freq] = df_resampled[dynamic_cols].values
@@ -564,11 +587,8 @@ class BaseDataset(Dataset):
                     x_s[freq] = df_resampled[self.cfg.evolving_attributes].values
                 if self.quality_inputs:
                     x_dq[freq] = df_resampled[self.quality_inputs].values
-                    x_dq_column_names = self.quality_inputs
-                # print(f"x_dq: {x_dq}")
-                # if x_dq:
-                #     print("IS x_dq")
-                #     print(x_dq_column_names)
+                if self.time_delta_cols:
+                    x_dt[freq] = df_resampled[self.time_delta_cols].values
 
                 # Add dates of the (resampled) data to the dates dict
                 dates[freq] = df_resampled.index.to_numpy()
@@ -600,12 +620,13 @@ class BaseDataset(Dataset):
                 # we pass x_d,x_dq, x_s, y as None.
                 flag = validate_samples(x_d=[x_d[freq] for freq in self.frequencies] if self.is_train else None,
                                         x_dq=[x_dq[freq] for freq in self.frequencies] if self.is_train and x_dq else None,
+                                        x_dt=[x_dt[freq] for freq in self.frequencies] if self.is_train and x_dt else None,
                                         x_s=[x_s[freq] for freq in self.frequencies] if self.is_train and x_s else None,
                                         y=[y[freq] for freq in self.frequencies] if self.is_train else None,
                                         frequency_maps=[frequency_maps[freq] for freq in self.frequencies],
                                         seq_length=self.seq_len,
                                         predict_last_n=self._predict_last_n)
-
+            
             # Concatenate autoregressive columns to dynamic inputs *after* validation, so as to not remove
             # samples with missing autoregressive inputs.
             # AR inputs must go at the end of the df/array (this is assumed by the AR model).
@@ -615,6 +636,7 @@ class BaseDataset(Dataset):
                 x_d_column_names += self.cfg.autoregressive_inputs
 
             valid_samples = np.argwhere(flag == 1)
+
             for f in valid_samples:
                 # store pointer to basin and the sample's index in each frequency
                 lookup.append((basin, [frequency_maps[freq][int(f)] for freq in self.frequencies]))
@@ -635,6 +657,8 @@ class BaseDataset(Dataset):
                     self._x_s[basin] = {freq: torch.from_numpy(_x_s.astype(np.float32)) for freq, _x_s in x_s.items()}
                 if x_dq:
                     self._x_dq[basin] = {freq: torch.from_numpy(_x_dq.astype(np.float32)) for freq, _x_dq in x_dq.items()}
+                if x_dt:
+                    self._x_dt[basin] = {freq: torch.from_numpy(_x_dt.astype(np.float32)) for freq, _x_dt in x_dt.items()}
                 self._dates[basin] = dates
             else:
                 basins_without_samples.append(basin)
@@ -744,6 +768,11 @@ class BaseDataset(Dataset):
         self.scaler["xarray_feature_scale"] = xr.std(skipna=True)
         self.scaler["xarray_feature_center"] = xr.mean(skipna=True)
 
+        # Do not normalize time delta columns 
+        for col in self.time_delta_cols:
+            self.scaler["xarray_feature_scale"][col] = 1
+            self.scaler["xarray_feature_center"][col] = 0
+
         # Normalize quality columns to 0-1. 
         for col in self.quality_inputs:
             min_val = xr[col].min(skipna=True).values
@@ -845,7 +874,7 @@ class BaseDataset(Dataset):
 
 
 @njit()
-def validate_samples(x_d: List[np.ndarray], x_dq: List[np.ndarray], x_s: List[np.ndarray], y: List[np.ndarray], seq_length: List[int],
+def validate_samples(x_d: List[np.ndarray], x_dq: List[np.ndarray], x_dt: List[np.ndarray], x_s: List[np.ndarray], y: List[np.ndarray], seq_length: List[int],
                      predict_last_n: List[int], frequency_maps: List[np.ndarray]) -> np.ndarray:
     """Checks for invalid samples due to NaN or insufficient sequence length.
 
@@ -855,6 +884,8 @@ def validate_samples(x_d: List[np.ndarray], x_dq: List[np.ndarray], x_s: List[np
         List of dynamic input data; one entry per frequency
     x_dq : List[np.ndarray]
         List of data quality input data; one entry per frequency.
+    x_dt : List[np.ndarray]
+        List of input data time deltas; one entry per frequency.
     x_s : List[np.ndarray]
         List of additional static input data; one entry per frequency
     y : List[np.ndarray]
@@ -889,6 +920,7 @@ def validate_samples(x_d: List[np.ndarray], x_dq: List[np.ndarray], x_s: List[np
             if x_d is not None:
                 _x_d = x_d[i][last_sample_of_freq - seq_length[i] + 1:last_sample_of_freq + 1]
                 if np.any(np.isnan(_x_d)):
+                    print(_x_d)
                     flag[j] = 0
                     continue
 
@@ -896,6 +928,12 @@ def validate_samples(x_d: List[np.ndarray], x_dq: List[np.ndarray], x_s: List[np
             if x_dq is not None:
                 _x_dq = x_dq[i][last_sample_of_freq - seq_length[i] + 1:last_sample_of_freq + 1]
                 if np.any(np.isnan(_x_dq)):
+                    flag[j] = 0
+                    continue
+
+            if x_dt is not None:
+                _x_dt = x_dt[i][last_sample_of_freq - seq_length[i] + 1:last_sample_of_freq + 1]
+                if np.any(np.isnan(_x_dt)):
                     flag[j] = 0
                     continue
 

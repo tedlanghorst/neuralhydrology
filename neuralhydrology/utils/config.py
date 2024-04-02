@@ -475,6 +475,10 @@ class Config(object):
     @property
     def initial_forget_bias(self) -> float:
         return self._cfg.get("initial_forget_bias", None)
+    
+    @property
+    def intermittent_flow_variable(self) -> str:
+        return self._cfg.get("intermittent_flow_variable", None)
 
     @property
     def is_continue_training(self) -> bool:
